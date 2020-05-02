@@ -1,64 +1,164 @@
 package mr
 
-import "fmt"
+import (
+	"fmt"
+	"io/ioutil"
+	"os"
+	"sort"
+	"strconv"
+	"sync"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
+import "../commons"
 
+// for sorting by key.
+type ByKey []commons.KeyValue
 
-//
-// Map functions return a slice of KeyValue.
-//
-type KeyValue struct {
-	Key   string
-	Value string
-}
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 //
-func ihash(key string) int {
+func ihash(key string, nReducer int) int {
 	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32() & 0x7fffffff)
+	_, _ = h.Write([]byte(key))
+	return int(h.Sum32() & 0x7fffffff) % nReducer
 }
-
 
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func Worker(mapf func(string, string) []commons.KeyValue) {
 
 	// Your worker implementation here.
+	info := CallMapperInfo()
+	reducerChans := getNReducerChan(info.NReducer)
+	completeChan := make(chan []commons.KeyValue)
 
-	// uncomment to send the Example RPC to the master.
-	// CallExample()
+	var reducerGroup sync.WaitGroup
+	var mergeGroup sync.WaitGroup
+	mergeGroup.Add(1)
+	go merger(completeChan, &mergeGroup)
+
+	for i := 0; i < len(reducerChans); i++ {
+		reducerGroup.Add(1)
+		go reducer(reducerChans[i], completeChan, &reducerGroup)
+	}
+
+	var mapperGroup sync.WaitGroup
+	for _, file := range info.Files {
+		mapperGroup.Add(1)
+		go mapper(mapf, file, reducerChans, &mapperGroup)
+	}
+
+	mapperGroup.Wait()
+	for i := 0; i < len(reducerChans); i++ {
+		close(reducerChans[i])
+	}
+	reducerGroup.Wait()
+	close(completeChan)
+	mergeGroup.Wait()
+}
+
+func getNReducerChan(nReducer int) []chan commons.KeyValue {
+	var arr []chan commons.KeyValue
+	for i := 0; i < nReducer; i++ {
+		arr = append(arr, make(chan commons.KeyValue))
+	}
+	return arr
+}
+
+func merger(completeChan chan []commons.KeyValue, wg *sync.WaitGroup) {
+	defer wg.Done()
+	kvs := make([] commons.KeyValue, 0)
+
+	for {
+		kv, more := <-completeChan
+		kvs = append(kvs, kv...)
+		if !more {
+			sort.Sort(ByKey(kvs)) // can improve to k-way merge
+			SendResToMaster(kvs)
+			return
+		}
+	}
+}
+
+func mapper(mapf func(string, string) []commons.KeyValue,
+			fileName string,
+			reducerChan []chan commons.KeyValue,
+			wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	nReducer := len(reducerChan)
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", fileName)
+	}
+	defer file.Close()
+
+	content, err := ioutil.ReadAll(file)
+	check(err)
+	kvs := mapf("", string(content))
+
+	for _, kv := range kvs {
+		reducerChan[ihash(kv.Key, nReducer)] <- kv
+	}
 
 }
 
-//
-// example function to show how to make an RPC call to the master.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
+func reducer(reducerChan chan commons.KeyValue,
+			completeChan chan []commons.KeyValue,
+			wg *sync.WaitGroup) {
+	defer wg.Done()
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+	kvs := make([] commons.KeyValue, 0)
 
-	// fill in the argument(s).
-	args.X = 99
+	for {
+		kv, more := <-reducerChan
+		kvs = append(kvs, kv)
+		if !more {
+			//fmt.Println("reducers", len(kvs))
+			sort.Sort(ByKey(kvs))
 
-	// declare a reply structure.
-	reply := ExampleReply{}
+			res := make([] commons.KeyValue, 0)
+			i := 0
+			for i < len(kvs) {
+				j := i + 1
+				for j < len(kvs) && kvs[j].Key == kvs[i].Key {
+					j++
+				}
+				if len(kvs[i].Key) > 0 {
+					res = append(res, commons.KeyValue{Key: kvs[i].Key, Value: strconv.Itoa(j - i)})
+				}
+				i = j
+			}
+			//fmt.Println("reducers:- ", len(res))
+			completeChan <- res
+			return
+		}
+	}
+}
 
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
+func check(e error) {
+	if e != nil {
+		panic(e)
+	}
+}
 
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+func CallMapperInfo() MapperInfoReply {
+	res := MapperInfoReply{}
+	call("Master.MapperInfo", &EmptyArgs{}, &res)
+	return res
+}
+
+func SendResToMaster(kvs []commons.KeyValue) {
+	call("Master.ResultHandler", &SendResArgs{Result: kvs}, &EmptyReply{})
 }
 
 //

@@ -10,6 +10,10 @@ package main
 // Please do not change this file.
 //
 
+import (
+	"../commons"
+	"time"
+)
 import "../mr"
 import "plugin"
 import "os"
@@ -17,21 +21,27 @@ import "fmt"
 import "log"
 
 func main() {
+	start := time.Now()
+
+	//... do something
+
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
 		os.Exit(1)
 	}
 
-	mapf, reducef := loadPlugin(os.Args[1])
-
-	mr.Worker(mapf, reducef)
+	mapf, _ := loadPluginNow(os.Args[1])
+	//mr.Worker(mapf, reducef)
+	mr.Worker(mapf)
+	fmt.Println(time.Since(start))
 }
 
 //
 // load the application Map and Reduce functions
 // from a plugin file, e.g. ../mrapps/wc.so
 //
-func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {
+func loadPluginNow(filename string) (func(string, string) []commons.KeyValue, func(string, []string) string) {
+	//fmt.Println(filename)
 	p, err := plugin.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot load plugin %v", filename)
@@ -40,7 +50,7 @@ func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(strin
 	if err != nil {
 		log.Fatalf("cannot find Map in %v", filename)
 	}
-	mapf := xmapf.(func(string, string) []mr.KeyValue)
+	mapf := xmapf.(func(string, string) []commons.KeyValue)
 	xreducef, err := p.Lookup("Reduce")
 	if err != nil {
 		log.Fatalf("cannot find Reduce in %v", filename)
