@@ -74,5 +74,14 @@ mapper1 will handle input01.txt
     
 
 
+### How to Run
 
+
+### Result Comparison
+```
+use mrsequential.go, run time would be 420 ms
+
+use mrmaster+mrworker (40 threads), run time would be 290 ms
+
+```
 
